@@ -35,9 +35,33 @@ EDGE_DEVICE = {"deviceID": "Web", "deviceTypeID": "AOAGZA014O5RE",
 WINDOW_MS = 43_200_000           # 12h per GetAirings call
 SEGMENTS  = 4                    # 4 x 12h = 48h of guide (raise for more days)
 
-# Only keep channels whose name contains one of these (case-insensitive).
-# Empty list = ALL channels. Example: ["PBS"] for just the PBS feeds.
+# Only keep enumerated channels whose name contains one of these (case-insensitive).
+# Empty list = ALL enumerated channels.
 CHANNEL_NAME_FILTER: list[str] = []
+
+# Walk the anonymous linear catalog too? False = only the EXTRA_CHANNELS below
+# (small, fast, reliable). True = the full ~340 anonymous lineup PLUS the extras.
+ENUMERATE_ALL = True
+
+# Channels pulled by explicit station ID regardless of the anonymous catalog.
+# These are surfaced only in the logged-in guide, but keho serves their EPG
+# anonymously by ID — so we fetch them directly. {titleId: display name}
+EXTRA_CHANNELS: dict[str, str] = {
+    "amzn1.dv.gti.5c6c6e07-9878-4c51-814f-ae9a8b89cc72": "PBS Drama",
+    "amzn1.dv.gti.585a82d3-6e98-4b4c-b7b2-56f67f57cdb6": "PBS Documentaries",
+    "amzn1.dv.gti.c0bcf892-a1ab-4f3a-b90d-4016355a119d": "PBS Food",
+    "amzn1.dv.gti.32f7c3f4-f14c-4a1b-893e-09d6cca7ee7c": "PBS Ken Burns",
+    "amzn1.dv.gti.c3624350-a7b1-467c-ade7-d60799ad12df": "PBS Nature",
+    "amzn1.dv.gti.a86f8707-7e62-4687-9214-3d9ee8884c9c": "PBS Genealogy",
+    "amzn1.dv.gti.09bc4dd0-02d5-4fec-9dc4-9a1e3b07f533": "PBS Travel",
+    "amzn1.dv.gti.cbb434fc-303a-45ed-be7f-e87455a0e0c5": "PBS KIDS",
+    "amzn1.dv.gti.b737846d-44de-4bf9-9395-f512adbcea55": "PBS Antiques Roadshow",
+    "amzn1.dv.gti.4f296149-caa7-4102-98c0-a1b6baae402f": "KLCS Public Media (PBS KLCS)",
+    "amzn1.dv.gti.3b112ae4-4f0b-48a5-9d3b-8aa1568f44ba": "PBS SoCal (PBS KOCE)",
+    "amzn1.dv.gti.45165fe7-19a0-446e-9336-cd322971954c": "PBS SoCal Plus (PBS KCET)",
+    "amzn1.dv.gti.e7e29a5a-db43-44ca-bf60-75717e89c418": "KVCR (PBS KVCR)",
+    "amzn1.dv.gti.1816f7ee-7c22-45ea-8427-7f9691590288": "Cartoon Rewind",
+}
 
 PROXY_API = ("https://api.proxyscrape.com/v2/?request=displayproxies"
              "&protocol=socks4&timeout=10000&country=US&ssl=all&anonymity=elite")
@@ -142,21 +166,27 @@ def get_paged(resource, key):
     return items
 
 def get_channels():
-    linear = call_api("dv-ios/linear/v1.js")
     out, seen = [], set()
-    for col in get_paged(linear, "collections"):
-        if col.get("type") != "epgGroup":
-            continue
-        for it in get_paged(col, "items"):
-            tid = it.get("titleId")
-            name = (it.get("title") or "").strip()
-            if not tid or not name or tid in seen:
+    if ENUMERATE_ALL:
+        linear = call_api("dv-ios/linear/v1.js")
+        for col in get_paged(linear, "collections"):
+            if col.get("type") != "epgGroup":
                 continue
-            if CHANNEL_NAME_FILTER and not any(
-                    f.lower() in name.lower() for f in CHANNEL_NAME_FILTER):
-                continue
+            for it in get_paged(col, "items"):
+                tid = it.get("titleId")
+                name = (it.get("title") or "").strip()
+                if not tid or not name or tid in seen:
+                    continue
+                if CHANNEL_NAME_FILTER and not any(
+                        f.lower() in name.lower() for f in CHANNEL_NAME_FILTER):
+                    continue
+                seen.add(tid)
+                out.append({"id": tid, "name": name, "logo": it.get("imageURL", "")})
+    # always add the explicit extras (dedup against whatever enumeration found)
+    for tid, name in EXTRA_CHANNELS.items():
+        if tid not in seen:
             seen.add(tid)
-            out.append({"id": tid, "name": name, "logo": it.get("imageURL", "")})
+            out.append({"id": tid, "name": name, "logo": ""})
     return out
 
 # ---------------------------------------------------------------------------
@@ -182,7 +212,12 @@ def parse_item(item):
         "title": item.get("title") or "Unknown",
         "sub": hc.get("episodeTitle") or "",
         "desc": item.get("synopsis") or "",
-        "image": item.get("heroImage") or "",
+        "season": hc.get("season"),
+        "episode": hc.get("episode"),
+        "rating": item.get("rating") or "",
+        "descriptors": item.get("contentDescriptors") or [],
+        # cover art (poster) preferred; fall back to the 16:9 hero
+        "image": item.get("coverImage") or item.get("heroImage") or "",
         "airingId": item.get("airingId"),
     }
 
@@ -250,6 +285,18 @@ def build_xmltv(channels, epg):
                 line += f'<sub-title>{esc(p["sub"])}</sub-title>'
             if p["desc"]:
                 line += f'<desc>{esc(p["desc"])}</desc>'
+            # season / episode -> both machine (xmltv_ns, 0-indexed) and onscreen
+            s, e = p.get("season"), p.get("episode")
+            if isinstance(s, int) and isinstance(e, int):
+                line += (f'<episode-num system="xmltv_ns">{s-1}.{e-1}.0</episode-num>'
+                         f'<episode-num system="onscreen">S{s}E{e}</episode-num>')
+            elif isinstance(e, int):
+                line += f'<episode-num system="onscreen">E{e}</episode-num>'
+            for d in p.get("descriptors", []):
+                if d:
+                    line += f'<category>{esc(d)}</category>'
+            if p["rating"]:
+                line += (f'<rating><value>{esc(p["rating"])}</value></rating>')
             if p["image"]:
                 line += f'<icon src="{esc(p["image"])}" />'
             line += "</programme>"
