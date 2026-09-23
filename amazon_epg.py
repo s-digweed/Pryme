@@ -106,7 +106,19 @@ def get_proxies():
 _PROBE_URL = (DAAPI_HOST + "dv-ios/linear/v1.js"
               "?deviceId=Web&deviceTypeId=AOAGZA014O5RE&enabledFeatures=zeno.daapi.cleanSlate")
 
+def is_us(hp):
+    """Amazon geolocates by IP, so the exit MUST be US or we get another
+    country's catalog (e.g. German channels)."""
+    try:
+        r = requests.get("https://ipinfo.io/country", proxies=_pd(hp), timeout=6)
+        return r.status_code == 200 and r.text.strip() == "US"
+    except Exception:
+        return False
+
 def probe(hp):
+    # 1) exit must be US, 2) must reach Amazon fast enough
+    if not is_us(hp):
+        return False
     try:
         r = requests.get(_PROBE_URL, headers=session.headers, proxies=_pd(hp), timeout=15)
         return r.status_code == 200 and isinstance(r.json(), dict) and "resource" in r.json()
@@ -119,7 +131,7 @@ def build_pool():
     for hp in proxies[:PROBE_LIMIT]:
         if probe(hp):
             WORKING_PROXIES.append(hp)
-            print(f"  reaches Amazon: {hp}")
+            print(f"  US proxy reaches Amazon: {hp}")
             if len(WORKING_PROXIES) >= WANT_PROXIES:
                 break
     return WORKING_PROXIES
@@ -428,7 +440,12 @@ def merge_with_state(channels, epg):
                 pp = dict(p); pp["ch"] = cid
                 merged[(cid, p["start"])] = pp
 
-    channels_out = list(chan_map.values())
+    # keep only channels seen this run OR that still have future programmes;
+    # this lets stale/foreign channels from a bad run drain out over time
+    current_ids = {c["id"] for c in channels}
+    have_progs = {p["ch"] for p in merged.values()}
+    keep = current_ids | have_progs
+    channels_out = [c for c in chan_map.values() if c["id"] in keep]
     progs_out = list(merged.values())
 
     # save state (gzipped to keep the repo lean)
