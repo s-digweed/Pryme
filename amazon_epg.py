@@ -20,7 +20,6 @@ import json as _json
 import collections
 import random
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 # Rolling state: previous runs' programmes are merged with each new run, so
@@ -43,9 +42,6 @@ EDGE_DEVICE = {"deviceID": "Web", "deviceTypeID": "AOAGZA014O5RE",
 WINDOW_MS = 43_200_000           # 12h per GetAirings call
 SEGMENTS  = 4                    # 4 x 12h = 48h of guide (raise for more days)
 BATCH_SIZE = 40                  # station IDs per GetAirings call (batched mode)
-CONCURRENCY = 10                 # per-station fetches to run in parallel (direct
-                                 # mode). ~10 keeps a 1,200-channel run to minutes
-                                 # without hammering keho. Lower it if you see 429s.
 
 # Only keep enumerated channels whose name contains one of these (case-insensitive).
 # Empty list = ALL enumerated channels.
@@ -173,14 +169,14 @@ def _get_json(url, tries=4):
         raise last
     # direct mode — runner's own IP (Proton tunnel)
     last = None
-    for attempt in range(tries):
+    for _ in range(tries):
         try:
             r = requests.get(url, headers=session.headers, timeout=REQ_TIMEOUT)
             r.raise_for_status()
             return r.json()
         except Exception as e:
             last = e
-            time.sleep(1 + attempt)   # mild backoff (eases transient 429s)
+            time.sleep(1)
     raise last
 
 def call_api(endpoint, params=None):
@@ -388,29 +384,6 @@ def build_xmltv(channels, epg):
 # Main
 # ---------------------------------------------------------------------------
 
-def fetch_singles_parallel(chans, base_ms, label="channels"):
-    """Fetch per-station EPG for many channels concurrently. Each channel's
-    airings_single() is independent and, in direct mode, uses requests.get()
-    (its own connection), so this is thread-safe. Returns {id: [programmes]}."""
-    out = {}
-    total = len(chans)
-    if not total:
-        return out
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
-        futs = {ex.submit(airings_single, c["id"], base_ms): c["id"] for c in chans}
-        done = 0
-        for fut in as_completed(futs):
-            cid = futs[fut]
-            try:
-                out[cid] = fut.result()
-            except Exception:
-                out[cid] = []
-            done += 1
-            if done % 50 == 0 or done == total:
-                print(f"  ...{done}/{total} {label}")
-    return out
-
-
 def run_once():
     channels = get_channels()
     print(f"Channels found: {len(channels)}")
@@ -444,19 +417,20 @@ def run_once():
             print(f"  ...batched {min((gi + 1) * BATCH_SIZE, len(ids))}/{len(ids)}")
 
     if not batched:
-        print(f"  per-station mode, {CONCURRENCY} in parallel")
-        got = fetch_singles_parallel(channels, base_ms)
-        for cid, progs in got.items():
-            epg[cid] = progs
+        for i, ch in enumerate(channels, 1):
+            epg[ch["id"]] = airings_single(ch["id"], base_ms)
+            if i % 25 == 0:
+                print(f"  ...{i}/{len(channels)} channels")
+            time.sleep(0.05)
     else:
         # fill any channel that came back empty (batch miss or genuine gap)
         empties = [c for c in channels if not epg[c["id"]]]
         if empties:
             print(f"  batched pass done; filling {len(empties)} empty channels")
-            got = fetch_singles_parallel(empties, base_ms, label="empties")
-            for cid, progs in got.items():
-                if progs:
-                    epg[cid] = progs
+            for c in empties:
+                got = airings_single(c["id"], base_ms)
+                if got:
+                    epg[c["id"]] = got
 
     total = sum(len(v) for v in epg.values())
     print(f"This run: {total} programmes")
