@@ -9,6 +9,8 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    env:
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,7 +41,7 @@ jobs:
           echo "Exit country: $(curl -s https://ipinfo.io/country)"
 
       - name: Run scraper
-        run: python amazon_epg.py
+        run: python -u amazon_epg.py
 
       - name: Disconnect Proton
         if: always()
