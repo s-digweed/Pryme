@@ -81,6 +81,11 @@ WANT_PROXIES = 5          # size of the working pool to build
 PROBE_LIMIT = 150         # how many raw proxies to probe before giving up
 REQ_TIMEOUT = 30          # per-request timeout (free proxies are slow)
 
+# False = go DIRECT through the runner's own IP (e.g. a Proton WireGuard tunnel
+# brought up by the workflow). No proxy pool, no merge needed — one clean run.
+# True = the old free-proxy pool (unreliable; keep only if there's no VPN).
+USE_PROXY = False
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
 
@@ -147,21 +152,31 @@ def build_pool():
 # API helpers — rotate across the pool on any failure
 # ---------------------------------------------------------------------------
 
-def _get_json(url, tries=None):
+def _get_json(url, tries=4):
     global _proxy_idx
-    if not WORKING_PROXIES:
-        raise RuntimeError("no working proxies")
-    tries = tries or max(3, len(WORKING_PROXIES))
+    if USE_PROXY and WORKING_PROXIES:
+        t = max(tries, len(WORKING_PROXIES))
+        last = None
+        for _ in range(t):
+            hp = WORKING_PROXIES[_proxy_idx % len(WORKING_PROXIES)]
+            try:
+                r = requests.get(url, headers=session.headers, proxies=_pd(hp), timeout=REQ_TIMEOUT)
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last = e
+                _proxy_idx += 1   # rotate to the next proxy and retry
+        raise last
+    # direct mode — runner's own IP (Proton tunnel)
     last = None
     for _ in range(tries):
-        hp = WORKING_PROXIES[_proxy_idx % len(WORKING_PROXIES)]
         try:
-            r = requests.get(url, headers=session.headers, proxies=_pd(hp), timeout=REQ_TIMEOUT)
+            r = requests.get(url, headers=session.headers, timeout=REQ_TIMEOUT)
             r.raise_for_status()
             return r.json()
         except Exception as e:
             last = e
-            _proxy_idx += 1   # rotate to the next proxy and retry
+            time.sleep(1)
     raise last
 
 def call_api(endpoint, params=None):
@@ -483,11 +498,22 @@ def build_xmltv_merged(channels, progs):
     return build_xmltv(channels, epg)
 
 def main():
-    print("Building proxy pool (verifying against Amazon)...")
-    if not build_pool():
-        print("No proxy could reach Amazon this run; re-run (free list churns). Aborting.")
-        sys.exit(1)
-    print(f"Pool: {len(WORKING_PROXIES)} proxies\n")
+    if USE_PROXY:
+        print("Building proxy pool (verifying against Amazon)...")
+        if not build_pool():
+            print("No US proxy reached Amazon this run; re-run (free list churns). Aborting.")
+            sys.exit(1)
+        print(f"Pool: {len(WORKING_PROXIES)} proxies\n")
+    else:
+        try:
+            cc = requests.get("https://ipinfo.io/country", timeout=8).text.strip()
+        except Exception:
+            cc = "?"
+        print(f"Direct mode (no proxy). Runner exit country: {cc}")
+        if cc != "US":
+            print("WARNING: exit is not US — the VPN tunnel is down or non-US; "
+                  "Amazon will serve the wrong catalog.")
+            sys.exit(1)
 
     try:
         result = run_once()
