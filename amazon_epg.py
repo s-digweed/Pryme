@@ -34,6 +34,7 @@ EDGE_DEVICE = {"deviceID": "Web", "deviceTypeID": "AOAGZA014O5RE",
 
 WINDOW_MS = 43_200_000           # 12h per GetAirings call
 SEGMENTS  = 4                    # 4 x 12h = 48h of guide (raise for more days)
+BATCH_SIZE = 40                  # station IDs per GetAirings call (batched mode)
 
 # Only keep enumerated channels whose name contains one of these (case-insensitive).
 # Empty list = ALL enumerated channels.
@@ -239,7 +240,8 @@ def station_detail_fallback(site_id):
                     seen.add(p["airingId"]); progs.append(p)
     return progs
 
-def get_airings(site_id, base_ms):
+def airings_single(site_id, base_ms):
+    """Per-station EPG across all segments (fallback path)."""
     progs, seen = [], set()
     for seg in range(SEGMENTS):
         url = edge_url("GetAiringsForTimeWindowLRC",
@@ -250,7 +252,6 @@ def get_airings(site_id, base_ms):
         except Exception:
             continue
         if res.get("failedStationIds"):
-            # station not served by GetAirings -> one detail call covers the day
             return station_detail_fallback(site_id)
         for schedule in res.get("schedule", []) or []:
             for item in schedule:
@@ -258,6 +259,30 @@ def get_airings(site_id, base_ms):
                 if p and p["airingId"] not in seen:
                     seen.add(p["airingId"]); progs.append(p)
     return progs
+
+def airings_batch(ids, base_ms):
+    """One GetAirings call for MANY station IDs per segment. Items carry their
+    own stationId, so we group by it. Returns {stationId: [parsed programmes]}."""
+    by = {sid: [] for sid in ids}
+    seen = {sid: set() for sid in ids}
+    joined = ",".join(ids)
+    for seg in range(SEGMENTS):
+        url = edge_url("GetAiringsForTimeWindowLRC",
+                       {"stationIds": joined, "durationInMs": WINDOW_MS,
+                        "startTimeEpochInMs": base_ms + seg * WINDOW_MS})
+        try:
+            res = _get_json(url).get("resource", {})
+        except Exception:
+            continue
+        for schedule in res.get("schedule", []) or []:
+            for item in schedule:
+                sid = item.get("stationId")
+                if sid not in by:
+                    continue
+                p = parse_item(item)
+                if p and p["airingId"] not in seen[sid]:
+                    seen[sid].add(p["airingId"]); by[sid].append(p)
+    return by
 
 # ---------------------------------------------------------------------------
 # XMLTV output
@@ -320,15 +345,43 @@ def run_once():
     now = datetime.now(timezone.utc)
     base_ms = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
-    epg, total = {}, 0
-    for i, ch in enumerate(channels, 1):
-        progs = get_airings(ch["id"], base_ms)
-        epg[ch["id"]] = progs
-        total += len(progs)
-        if i % 20 == 0:
-            print(f"  ...{i}/{len(channels)} channels, {total} programmes so far")
-        time.sleep(0.1)  # be polite
+    ids = [c["id"] for c in channels]
+    epg = {cid: [] for cid in ids}
+    groups = [ids[i:i + BATCH_SIZE] for i in range(0, len(ids), BATCH_SIZE)]
 
+    # Try batched mode; auto-detect whether the API honours multiple stationIds.
+    batched = True
+    for gi, grp in enumerate(groups):
+        got = airings_batch(grp, base_ms)
+        for sid, progs in got.items():
+            if progs:
+                epg[sid] = progs
+        if gi == 0 and len(grp) > 1:
+            distinct = sum(1 for s in grp if epg.get(s))
+            if distinct <= 1:
+                batched = False
+                print("  batching not supported -> per-station mode")
+                break
+        elif batched and (gi + 1) % 5 == 0:
+            print(f"  ...batched {min((gi + 1) * BATCH_SIZE, len(ids))}/{len(ids)}")
+
+    if not batched:
+        for i, ch in enumerate(channels, 1):
+            epg[ch["id"]] = airings_single(ch["id"], base_ms)
+            if i % 25 == 0:
+                print(f"  ...{i}/{len(channels)} channels")
+            time.sleep(0.05)
+    else:
+        # fill any channel that came back empty (batch miss or genuine gap)
+        empties = [c for c in channels if not epg[c["id"]]]
+        if empties:
+            print(f"  batched pass done; filling {len(empties)} empty channels")
+            for c in empties:
+                got = airings_single(c["id"], base_ms)
+                if got:
+                    epg[c["id"]] = got
+
+    total = sum(len(v) for v in epg.values())
     print(f"Total programmes: {total}")
     return build_xmltv(channels, epg)
 
