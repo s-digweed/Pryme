@@ -4,7 +4,7 @@ permissions:
 
 on:
   schedule:
-    - cron: '0 2,8,14,20 * * *'   # 4x/day — 05:00, 11:00, 17:00, 23:00 KSA
+    - cron: '0 2 * * *'   # daily 02:00 UTC (05:00 KSA) — one clean run is enough now
   workflow_dispatch:
 
 jobs:
@@ -19,13 +19,29 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests pysocks
+          pip install requests
+          sudo apt-get update
+          sudo apt-get install -y wireguard-tools
+
+      - name: Connect Proton (US)
+        run: |
+          printf '%s\n' "${{ secrets.PROTON_WG }}" \
+            | grep -v '^DNS' \
+            | sed -E '/^Address/ s/,.*//; /^AllowedIPs/ s/,.*//' \
+            | sudo tee /etc/wireguard/wg0.conf >/dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo wg-quick up wg0
+          echo "Exit country: $(curl -s https://ipinfo.io/country)"
 
       - name: Run amazon_epg.py
         run: python amazon_epg.py
+
+      - name: Disconnect Proton
+        if: always()
+        run: sudo wg-quick down wg0 || true
 
       - name: Commit EPG
         run: |
