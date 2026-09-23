@@ -71,10 +71,14 @@ EXTRA_CHANNELS: dict[str, str] = {
     "amzn1.dv.gti.1816f7ee-7c22-45ea-8427-7f9691590288": "Cartoon Rewind",
 }
 
-PROXY_API = ("https://api.proxyscrape.com/v2/?request=displayproxies"
-             "&protocol=socks4&timeout=10000&country=US&ssl=all&anonymity=elite")
+# US free-proxy sources (socks4 + socks5). US-verified ones are scarce, so we
+# pull from a couple of lists and probe a lot of them.
+PROXY_APIS = [
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=US&ssl=all&anonymity=elite",
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=US&ssl=all&anonymity=elite",
+]
 WANT_PROXIES = 5          # size of the working pool to build
-PROBE_LIMIT = 60          # how many raw proxies to probe before giving up
+PROBE_LIMIT = 150         # how many raw proxies to probe before giving up
 REQ_TIMEOUT = 30          # per-request timeout (free proxies are slow)
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -86,21 +90,24 @@ session.headers.update({"User-Agent": UA, "Accept": "application/json"})
 WORKING_PROXIES: list[str] = []
 _proxy_idx = 0
 
-def _pd(hp):
-    return {"http": f"socks4://{hp}", "https": f"socks4://{hp}"}
+def _pd(url):
+    # url already carries its scheme, e.g. socks4://ip:port or socks5://ip:port
+    return {"http": url, "https": url}
 
 # ---------------------------------------------------------------------------
 # Proxy handling — verify against Amazon's OWN endpoint, keep a rotating pool
 # ---------------------------------------------------------------------------
 
 def get_proxies():
-    try:
-        r = requests.get(PROXY_API, timeout=20)
-        if r.status_code == 200:
-            return [p.strip() for p in r.text.splitlines() if p.strip()]
-    except Exception as e:
-        print(f"proxy fetch error: {e}")
-    return []
+    out = []
+    for scheme, url in (("socks4", PROXY_APIS[0]), ("socks5", PROXY_APIS[1])):
+        try:
+            r = requests.get(url, timeout=20)
+            if r.status_code == 200:
+                out += [f"{scheme}://{p.strip()}" for p in r.text.splitlines() if p.strip()]
+        except Exception as e:
+            print(f"proxy fetch error ({scheme}): {e}")
+    return out
 
 # a small daapi call used to prove a proxy can actually reach Amazon fast enough
 _PROBE_URL = (DAAPI_HOST + "dv-ios/linear/v1.js"
@@ -171,14 +178,19 @@ def call_api(endpoint, params=None):
     return data.get("resource", {}) or {}
 
 def get_paged(resource, key):
-    """Follow paginationLink, concatenating resource[key] across pages."""
+    """Follow paginationLink, concatenating resource[key] across pages.
+    Resilient: a failed page stops pagination and returns what we have."""
     items = list(resource.get(key, []) or [])
     nxt = resource.get("paginationLink")
     guard = 0
     while nxt and guard < 100:
         guard += 1
         rc = nxt.get("requestContext", {})
-        page = call_api(rc.get("transform", ""), rc.get("requestParameters", {}))
+        try:
+            page = call_api(rc.get("transform", ""), rc.get("requestParameters", {}))
+        except Exception as e:
+            print(f"  pagination stopped ({e.__class__.__name__}); {len(items)} items so far")
+            break
         if not page or page.get("error"):
             break
         items.extend(page.get(key, []) or [])
@@ -188,8 +200,13 @@ def get_paged(resource, key):
 def get_channels():
     out, seen = [], set()
     if ENUMERATE_ALL:
-        linear = call_api("dv-ios/linear/v1.js")
-        for col in get_paged(linear, "collections"):
+        try:
+            linear = call_api("dv-ios/linear/v1.js")
+            collections_list = get_paged(linear, "collections")
+        except Exception as e:
+            print(f"  enumeration failed ({e.__class__.__name__}); using locked channels only")
+            collections_list = []
+        for col in collections_list:
             if col.get("type") != "epgGroup":
                 continue
             for it in get_paged(col, "items"):
