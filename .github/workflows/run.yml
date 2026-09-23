@@ -2,12 +2,13 @@ name: Amazon Prime EPG
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 330
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,9 +34,6 @@ jobs:
           sudo chmod 600 /etc/wireguard/wg0.conf
           sudo wg-quick up wg0
           sudo wg show wg0
-          # All traffic now goes through the tunnel, so the runner's default
-          # (Azure internal) DNS is unreachable. Point at a public resolver
-          # that IS reachable through Proton, or nothing can resolve names.
           sudo rm -f /etc/resolv.conf
           printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' | sudo tee /etc/resolv.conf >/dev/null
           echo "Exit country: $(curl -s https://ipinfo.io/country)"
