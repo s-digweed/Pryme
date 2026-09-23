@@ -4,7 +4,7 @@ permissions:
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # daily 02:00 UTC (05:00 KSA)
+    - cron: '0 2,8,14,20 * * *'   # 4x/day — 05:00, 11:00, 17:00, 23:00 KSA
   workflow_dispatch:
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add amazon_epg.xml
+          git add amazon_epg.xml amazon_epg_state.json.gz
           git commit -m "Update Amazon EPG - $(date -u +'%Y-%m-%d %H:%M UTC')" || echo "No changes"
           git push
         env:
