@@ -15,9 +15,16 @@ Output: amazon_epg.xml  (flat XMLTV, IPTVBoss-friendly)
 
 import sys
 import time
+import gzip
+import json as _json
+import collections
 import random
 import requests
 from datetime import datetime, timezone
+
+# Rolling state: previous runs' programmes are merged with each new run, so
+# partial per-run coverage (flaky proxies) accumulates into a full guide.
+STATE_FILE = "amazon_epg_state.json.gz"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -382,7 +389,63 @@ def run_once():
                     epg[c["id"]] = got
 
     total = sum(len(v) for v in epg.values())
-    print(f"Total programmes: {total}")
+    print(f"This run: {total} programmes")
+    return channels, epg
+
+
+# ---------------------------------------------------------------------------
+# Rolling merge — accumulate coverage across runs
+# ---------------------------------------------------------------------------
+
+def merge_with_state(channels, epg):
+    """Merge this run's data with saved state. Dedup by (channel, start),
+    this run overriding, and prune anything already finished."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    chan_map = {}
+    merged = {}   # (ch, start) -> programme dict (with 'ch')
+
+    # load prior state
+    try:
+        with gzip.open(STATE_FILE, "rt", encoding="utf-8") as f:
+            st = _json.load(f)
+        for c in st.get("channels", []):
+            chan_map[c["id"]] = c
+        for p in st.get("programmes", []):
+            if p.get("stop", 0) > now_ms:            # drop finished shows
+                merged[(p["ch"], p["start"])] = p
+        print(f"State loaded: {len(merged)} future programmes carried over")
+    except FileNotFoundError:
+        print("No prior state (first run)")
+    except Exception as e:
+        print(f"State load warning: {e}")
+
+    # overlay this run (wins on conflict)
+    for c in channels:
+        chan_map[c["id"]] = {"id": c["id"], "name": c["name"], "logo": c.get("logo", "")}
+    for cid, progs in epg.items():
+        for p in progs:
+            if p["stop"] > now_ms:
+                pp = dict(p); pp["ch"] = cid
+                merged[(cid, p["start"])] = pp
+
+    channels_out = list(chan_map.values())
+    progs_out = list(merged.values())
+
+    # save state (gzipped to keep the repo lean)
+    try:
+        with gzip.open(STATE_FILE, "wt", encoding="utf-8") as f:
+            _json.dump({"channels": channels_out, "programmes": progs_out}, f)
+    except Exception as e:
+        print(f"State save warning: {e}")
+
+    print(f"Merged guide: {len(channels_out)} channels, {len(progs_out)} programmes")
+    return channels_out, progs_out
+
+
+def build_xmltv_merged(channels, progs):
+    epg = collections.defaultdict(list)
+    for p in progs:
+        epg[p["ch"]].append(p)
     return build_xmltv(channels, epg)
 
 def main():
@@ -393,14 +456,18 @@ def main():
     print(f"Pool: {len(WORKING_PROXIES)} proxies\n")
 
     try:
-        xml = run_once()
+        result = run_once()
     except Exception as e:
         print(f"ERROR: {e}")
-        xml = None
+        result = None
 
-    if not xml:
-        print("ERROR: scrape failed; leaving previous file untouched.")
+    if not result:
+        print("ERROR: scrape failed; leaving previous files untouched.")
         sys.exit(1)
+
+    channels, epg = result
+    merged_channels, merged_progs = merge_with_state(channels, epg)
+    xml = build_xmltv_merged(merged_channels, merged_progs)
 
     with open("amazon_epg.xml", "w", encoding="utf-8") as f:
         f.write(xml)
