@@ -2,7 +2,7 @@ name: Amazon Prime EPG
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '17 */3 * * *'
   workflow_dispatch:
 
 jobs:
