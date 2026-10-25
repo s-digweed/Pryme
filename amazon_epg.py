@@ -41,7 +41,7 @@ EDGE_DEVICE = {"deviceID": "Web", "deviceTypeID": "AOAGZA014O5RE",
 
 WINDOW_MS = 43_200_000           # 12h per GetAirings call
 SEGMENTS  = 4                    # 4 x 12h = 48h of guide (raise for more days)
-BATCH_SIZE = 40                  # station IDs per GetAirings call (batched mode)
+BATCH_SIZE = 20                  # station IDs per GetAirings call (batched mode)
 
 # Only keep enumerated channels whose name contains one of these (case-insensitive).
 # Empty list = ALL enumerated channels.
@@ -152,7 +152,7 @@ def build_pool():
 # API helpers — rotate across the pool on any failure
 # ---------------------------------------------------------------------------
 
-def _get_json(url, tries=4):
+def _get_json(url, q, tries=4):
     global _proxy_idx
     if USE_PROXY and WORKING_PROXIES:
         t = max(tries, len(WORKING_PROXIES))
@@ -160,7 +160,7 @@ def _get_json(url, tries=4):
         for _ in range(t):
             hp = WORKING_PROXIES[_proxy_idx % len(WORKING_PROXIES)]
             try:
-                r = requests.get(url, headers=session.headers, proxies=_pd(hp), timeout=REQ_TIMEOUT)
+                r = requests.get(url, params=q, headers=session.headers, proxies=_pd(hp), timeout=REQ_TIMEOUT)
                 r.raise_for_status()
                 return r.json()
             except Exception as e:
@@ -171,7 +171,7 @@ def _get_json(url, tries=4):
     last = None
     for _ in range(tries):
         try:
-            r = requests.get(url, headers=session.headers, timeout=REQ_TIMEOUT)
+            r = requests.get(url, params=q, headers=session.headers, timeout=REQ_TIMEOUT)
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -188,8 +188,7 @@ def call_api(endpoint, params=None):
         except (TypeError, ValueError):
             pass
     q.update(DEVICE)
-    qs = "&".join(f"{k}={requests.utils.quote(str(v), safe='')}" for k, v in q.items())
-    data = _get_json(f"{DAAPI_HOST}{endpoint}?{qs}")
+    data = _get_json(f"{DAAPI_HOST}{endpoint}", q)
     return data.get("resource", {}) or {}
 
 def get_paged(resource, key):
@@ -248,8 +247,7 @@ def get_channels():
 def edge_url(endpoint, extra):
     q = dict(extra)
     q.update(EDGE_DEVICE)
-    qs = "&".join(f"{k}={requests.utils.quote(str(v), safe='')}" for k, v in q.items())
-    return f"{EDGE_HOST}{endpoint}?{qs}"
+    return (f"{EDGE_HOST}{endpoint}", q)
 
 def parse_item(item):
     try:
@@ -277,7 +275,7 @@ def station_detail_fallback(site_id):
     """Used when GetAirings reports the station in failedStationIds."""
     progs, seen = [], set()
     try:
-        res = _get_json(edge_url("StationDetailLRC",
+        res = _get_json(*edge_url("StationDetailLRC",
                                  {"presentationScheme": "living-room-react",
                                   "stationId": site_id})).get("resource", {})
     except Exception:
@@ -299,7 +297,7 @@ def airings_single(site_id, base_ms):
                        {"stationIds": site_id, "durationInMs": WINDOW_MS,
                         "startTimeEpochInMs": base_ms + seg * WINDOW_MS})
         try:
-            res = _get_json(url).get("resource", {})
+            res = _get_json(*url).get("resource", {})
         except Exception:
             continue
         if res.get("failedStationIds"):
@@ -316,13 +314,12 @@ def airings_batch(ids, base_ms):
     own stationId, so we group by it. Returns {stationId: [parsed programmes]}."""
     by = {sid: [] for sid in ids}
     seen = {sid: set() for sid in ids}
-    joined = ",".join(ids)
     for seg in range(SEGMENTS):
         url = edge_url("GetAiringsForTimeWindowLRC",
-                       {"stationIds": joined, "durationInMs": WINDOW_MS,
+                       {"stationIds": ids, "durationInMs": WINDOW_MS,
                         "startTimeEpochInMs": base_ms + seg * WINDOW_MS})
         try:
-            res = _get_json(url).get("resource", {})
+            res = _get_json(*url).get("resource", {})
         except Exception:
             continue
         for schedule in res.get("schedule", []) or []:
