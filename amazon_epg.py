@@ -71,6 +71,14 @@ EXTRA_CHANNELS: dict[str, str] = {
     "amzn1.dv.gti.1816f7ee-7c22-45ea-8427-7f9691590288": "Cartoon Rewind",
 }
 
+# Logos for extras that Amazon doesn't hand us (not in the anonymous catalog).
+EXTRA_LOGOS: dict[str, str] = {
+    "amzn1.dv.gti.4f296149-caa7-4102-98c0-a1b6baae402f": "https://i.imgur.com/vFd2Hrm.png",  # KLCS
+    "amzn1.dv.gti.e7e29a5a-db43-44ca-bf60-75717e89c418": "https://i.imgur.com/rwelzwQ.png",  # KVCR
+    "amzn1.dv.gti.3b112ae4-4f0b-48a5-9d3b-8aa1568f44ba": "https://i.imgur.com/P6e7eqB.png",  # PBS SoCal (KOCE)
+    "amzn1.dv.gti.45165fe7-19a0-446e-9336-cd322971954c": "https://i.imgur.com/iOUSUKP.png",  # PBS SoCal Plus (KCET)
+}
+
 # US free-proxy sources (socks4 + socks5). US-verified ones are scarce, so we
 # pull from a couple of lists and probe a lot of them.
 PROXY_APIS = [
@@ -239,6 +247,9 @@ def get_channels():
         if tid not in seen:
             seen.add(tid)
             out.append({"id": tid, "name": name, "logo": ""})
+    for ch in out:                       # fill logos Amazon doesn't provide
+        if not ch["logo"] and ch["id"] in EXTRA_LOGOS:
+            ch["logo"] = EXTRA_LOGOS[ch["id"]]
     return out
 
 # ---------------------------------------------------------------------------
