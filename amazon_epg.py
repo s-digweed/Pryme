@@ -497,6 +497,31 @@ def build_xmltv_merged(channels, progs):
         epg[p["ch"]].append(p)
     return build_xmltv(channels, epg)
 
+# ---------------------------------------------------------------------------
+# Status page (status.json, read by status.html in the PlexTV repo)
+# ---------------------------------------------------------------------------
+
+def write_status(channels, progs, run_count):
+    """Every channel (all US for now), whether it has listings, plus freshness."""
+    try:
+        from status_page import update_status, epg_stats
+    except ImportError:
+        print("status_page.py missing - status page skipped"); return
+    with_guide = {p["ch"] for p in progs}
+    rows = [{"id": c["id"], "name": c["name"], "logo": c.get("logo", ""), "group": "",
+             "status": "guide" if c["id"] in with_guide else "noguide",
+             "detail": "" if c["id"] in with_guide else "No listings right now"}
+            for c in channels]
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    notes = ["Guide only: Amazon's channels are Widevine DRM, so there is no playlist",
+             f"This run fetched {run_count:,} programmes; the merged guide holds {len(progs):,}"]
+    health = {"repo": "s-digweed/Pryme", "every_h": 1, "guide_only": True,
+              "epg_updated": now, "notes": notes}
+    health.update(epg_stats("amazon_epg.xml"))
+    update_status("Prime Video (Pryme)", {"us": {"name": "United States", "channels": rows}},
+                  "status.json", "status_state.json", health=health)
+
+
 def main():
     if USE_PROXY:
         print("Building proxy pool (verifying against Amazon)...")
@@ -532,6 +557,10 @@ def main():
     with open("amazon_epg.xml", "w", encoding="utf-8") as f:
         f.write(xml)
     print("Wrote amazon_epg.xml")
+    try:
+        write_status(merged_channels, merged_progs, sum(len(v) for v in epg.values()))
+    except Exception as e:                       # the guide matters more than the status page
+        print(f"status page skipped: {e}")
 
 if __name__ == "__main__":
     main()
