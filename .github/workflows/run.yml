@@ -52,5 +52,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add amazon_epg.xml amazon_epg_state.json.gz
+          for f in status.json status_state.json; do if [ -e "$f" ]; then git add "$f"; fi; done
           git commit -m "Update Amazon EPG" || echo "No changes to commit"
           git push
