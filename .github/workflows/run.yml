@@ -2,7 +2,7 @@ name: Amazon Prime EPG
 
 on:
   schedule:
-    - cron: '17 */1 * * *'
+    - cron: '47 */1 * * *'
   workflow_dispatch:
 
 # One run at a time: an overlapping run would reuse the same Proton WireGuard key
